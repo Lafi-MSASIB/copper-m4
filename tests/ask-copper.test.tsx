@@ -312,6 +312,9 @@ describe("Part A: the Ask Copper chat widget", () => {
         },
       ],
       useTools: true,
+      // Module 4: the tools-on chat also sends an id for the conversation, and
+      // nothing else about who is answering: the server decides that.
+      chatId: expect.any(String),
     });
 
     // A follow-up in the same conversation carries the earlier turns.

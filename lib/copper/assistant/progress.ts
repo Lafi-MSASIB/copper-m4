@@ -2,6 +2,8 @@
 // summaries, each tool call (with what went in and what came out), and the
 // reply. The panel draws this as it changes.
 
+import type { AgentId } from "@/lib/copper/refund/allowlists";
+
 export type ThinkingStep = { type: "thinking"; text: string };
 
 export type ToolStep = {
@@ -20,6 +22,10 @@ export type Progress = {
   steps: Step[];
   reply: string;
   status: "working" | "done" | "error";
+  /** Which agent is answering (Module 4). Absent when nothing is routed. */
+  agent?: AgentId;
+  /** Which agent the chat belongs to for the next message, once this one is done. */
+  activeAfter?: AgentId;
 };
 
 /** Every tool call in an answer, in order. */
@@ -40,4 +46,9 @@ export const TOOL_LABELS: Record<string, string> = {
   calculate_cost: "Working out the cost",
   check_availability: "Checking stock",
   search_docs: "Searching the documents",
+  handoff_to_refund_agent: "Handing over to the Refund agent",
+  lookup_order: "Looking up the order",
+  request_refund: "Requesting the refund",
+  check_refund_status: "Checking the refund's status",
+  handoff_back_to_copper: "Handing back to Copper",
 };

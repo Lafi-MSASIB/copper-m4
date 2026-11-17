@@ -35,6 +35,7 @@ import {
   TOOL_LABELS,
 } from "@/lib/copper/assistant/progress";
 import { formatUsd, getPlans, getProducts } from "@/lib/copper/catalog";
+import { AGENT_NAMES, ALLOWLISTS } from "@/lib/copper/refund/allowlists";
 import { cn } from "@/lib/utils";
 
 const STARTERS = [
@@ -47,6 +48,14 @@ type Turn = { question: string; progress: Progress };
 type Chats = { tools: Turn[]; noTools: Turn[] };
 
 const WORKING: Progress = { steps: [], reply: "", status: "working" };
+
+const REFUND_TOOL_NAMES = new Set([
+  "lookup_order",
+  "request_refund",
+  "check_refund_status",
+  "handoff_to_refund_agent",
+  "handoff_back_to_copper",
+]);
 
 export function AskCopper({
   aiConfigured,
@@ -61,10 +70,19 @@ export function AskCopper({
   const [chats, setChats] = useState<Chats>({ tools: [], noTools: [] });
   const [draft, setDraft] = useState("");
   const body = useRef<HTMLDivElement>(null);
+  // Which conversation this is. Only an id: the server decides the active agent
+  // and the customer, so nothing in the browser can change them.
+  const chatId = useRef<string | null>(null);
 
   const key = useTools ? "tools" : "noTools";
   const turns = chats[key];
   const busy = turns.at(-1)?.progress.status === "working";
+  // Who the next message goes to: the agent that finished the last turn.
+  const lastTurn = chats.tools.at(-1)?.progress;
+  const activeAgent =
+    (lastTurn?.status === "working"
+      ? lastTurn.agent
+      : (lastTurn?.activeAfter ?? lastTurn?.agent)) ?? "copper";
 
   // Open from the header's #ask link or a page load at /#ask. Clicking the
   // link again fires no hashchange, so listen for the click too.
@@ -112,9 +130,13 @@ export function AskCopper({
       [chat]: [...all[chat], { question, progress: WORKING }],
     }));
     try {
+      if (chat === "tools" && !chatId.current) {
+        chatId.current = crypto.randomUUID();
+      }
       const { progress } = await askCopper({
         messages,
         useTools: chat === "tools",
+        chatId: chat === "tools" ? (chatId.current ?? undefined) : undefined,
       });
       for await (const update of readLive(progress)) setProgress(update);
     } catch {
@@ -179,6 +201,14 @@ export function AskCopper({
                     {useTools ? "Checks every answer" : "Model guesses alone"}
                   </span>
                 </div>
+                {useTools && (
+                  <span
+                    data-testid="active-agent"
+                    className="rounded-full bg-white/15 px-2.5 py-0.5 text-xs font-semibold"
+                  >
+                    {AGENT_NAMES[activeAgent]}
+                  </span>
+                )}
                 <Switch
                   aria-label="Use tools"
                   checked={useTools}
@@ -268,6 +298,8 @@ function Answer({
   useTools: boolean;
 }) {
   const { steps, reply, status } = progress;
+  const agent = progress.agent ?? "copper";
+  const name = AGENT_NAMES[agent];
   const used = new Set(
     steps.filter((s): s is ToolStep => s.type === "tool").map((s) => s.name),
   );
@@ -289,26 +321,26 @@ function Answer({
           node={<WrenchIcon className="size-3" />}
           nodeClass="bg-muted-foreground"
           label={
-            useTools ? "Tools Copper can use" : "Tools given to Copper: none"
+            useTools ? `Tools ${name} can use` : "Tools given to Copper: none"
           }
         >
           <div className="flex flex-wrap gap-1.5">
-            {Object.keys(TOOL_LABELS).map((name) => (
+            {ALLOWLISTS[agent].map((tool) => (
               <span
-                key={name}
+                key={tool}
                 className={cn(
                   "rounded-md px-2 py-0.5 font-mono text-xs",
                   !useTools &&
                     "text-muted-foreground bg-background line-through",
                   useTools &&
-                    used.has(name) &&
+                    used.has(tool) &&
                     "bg-accent font-bold text-white",
                   useTools &&
-                    !used.has(name) &&
+                    !used.has(tool) &&
                     "bg-background text-muted-foreground",
                 )}
               >
-                {name}
+                {tool}
               </span>
             ))}
           </div>
@@ -325,7 +357,7 @@ function Answer({
               key={i}
               node={<BrainIcon className="size-3" />}
               nodeClass={useTools ? "bg-primary" : "bg-chart-3"}
-              label="Copper is thinking"
+              label={`${name} is thinking`}
             >
               <p
                 data-testid="thinking"
@@ -341,8 +373,8 @@ function Answer({
               nodeClass="bg-accent"
               label={
                 step.state === "calling"
-                  ? "Copper is calling a tool"
-                  : "Copper called a tool"
+                  ? `${name} is calling a tool`
+                  : `${name} called a tool`
               }
             >
               <ToolCard step={step} number={++toolCount} />
@@ -376,7 +408,7 @@ function Answer({
 
       {(reply || !working) && (
         <div className="bg-card ml-2 rounded-2xl rounded-tl-sm border p-4 shadow-xs">
-          <p className="text-primary mb-1 text-xs font-bold">Copper</p>
+          <p className="text-primary mb-1 text-xs font-bold">{name}</p>
           {!useTools && (
             <div className="border-chart-3 bg-chart-3/10 mb-3 rounded-lg border p-3 text-xs">
               <p className="flex items-center gap-1.5 font-bold">
@@ -656,6 +688,35 @@ function ToolOutput({ name, output }: { name: string; output: any }) {
         ))}
       </ol>
     );
+  // The Refund agent's tools (and the two hand-offs): the order, a status, and the message.
+  if (REFUND_TOOL_NAMES.has(name) && output?.status) {
+    const state = String(
+      output.requestStatus ?? output.order?.orderStatus ?? output.status,
+    ).replaceAll("_", " ");
+    return (
+      <div className="space-y-1.5 text-xs">
+        {output.order && (
+          <div className="flex justify-between gap-3 font-medium">
+            <span>
+              {output.order.item}{" "}
+              <span className="text-muted-foreground font-normal">
+                ({output.order.id})
+              </span>
+            </span>
+            <span className="font-mono">{output.order.amountText}</span>
+          </div>
+        )}
+        <p>
+          <span className="bg-accent/15 rounded-full px-2 py-0.5 font-medium capitalize">
+            {state}
+          </span>
+        </p>
+        {output.message && (
+          <p className="text-muted-foreground">{output.message}</p>
+        )}
+      </div>
+    );
+  }
   // A tool without its own layout yet: show what came back as plain text.
   return (
     <pre className="max-h-48 overflow-auto text-xs whitespace-pre-wrap">

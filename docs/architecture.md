@@ -139,3 +139,92 @@ second agent, and a person approving the large ones.
 |---|---|---|
 | Page | `app/support/page.tsx` | The "Refund Console" title and nothing else yet, linked from the header as Support |
 | Chat panel | `components/copper/ask-copper.tsx` | With the `docked` prop it starts open and the page beside it stays clickable. It is the same single agent and tools as on the home page |
+
+## Module 4: Refund flow with two agents and a person
+
+**Summary:** Copper hands a refund request to a second agent, the Refund agent,
+which has its own instructions and tools. The app (code, not the model) compares
+the order amount with an auto-refund limit: at or under it the refund goes
+through; over it the agent pauses until a person clicks Approve or Reject in the
+Refund Console. The model can never argue past the limit.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Page / route | `app/support/page.tsx` | The Refund Console, with Ask Copper docked on the right |
+| Components | `components/copper/support/` | `refund-console.tsx` (loads and refreshes every 4 seconds) and `console-sections.tsx` (limit, orders table, pending approvals, recent decisions, audit log). `components/copper/ask-copper.tsx` shows which agent is active and sends a chat id |
+| Rules | `lib/copper/refund/rules.ts` | Pure functions: `decideRefund`, `parseLimitDollars`, `canDecide`, `validateReason`. No database, no AI |
+| Store | `lib/copper/refund/store.ts`, `db.ts` | The only place that reads or writes orders, requests, the limit, chat state and the audit log (Supabase, server-only key). Every change is a compare-and-set |
+| Agents | `lib/copper/refund/router.ts`, `allowlists.ts` | Which instructions and tools the active agent gets, and the check that runs each time a tool runs |
+| Console actions | `lib/copper/refund/actions.ts` | `approveRefund`, `rejectRefund`, `setRefundLimit`, `loadConsole`: server actions for the Console's buttons only |
+| Data | Supabase tables `orders`, `refund_requests`, `settings`, `chat_state`, `audit_log` | Row-level security on, no policies: the public key reads and changes nothing. Money is integer cents |
+| AI calls | `lib/ai/call.ts` with `{ module: 4, feature: "refund-agent" }` | The Refund agent's streamed turns. Copper still logs as `{ module: 2, feature: "ask-copper" }` |
+| Environment | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Server-only. Without them the Console says the order system isn't connected and Copper runs on its own |
+
+### The four parts of each agent
+
+| Part | Copper | Refund agent |
+|---|---|---|
+| **1. Instructions** | `lib/copper/assistant/instructions.ts` (`COPPER_INSTRUCTIONS`). Hands refund requests over; doesn't discuss eligibility or amounts | `lib/copper/refund/instructions.ts` (`REFUND_INSTRUCTIONS`). Refund requests only; never promises an outcome before `request_refund` returns |
+| **2. Tools & permissions** | `get_products`, `get_prices`, `calculate_cost`, `check_availability`, `handoff_to_refund_agent`, **`search_docs`** (shared). Lists in `allowlists.ts`; tools built in `assistant/tools.ts` | `lookup_order`, `request_refund`, `check_refund_status`, `handoff_back_to_copper`, **`search_docs`** (shared). Lists in `allowlists.ts`; tools built in `refund/tools.ts` |
+| **3. State & memory** | The database is the source of truth, never the chat text: `chat_state` (which agent is active, which customer), read by `getChatState` in `store.ts`. The agent re-reads orders and refund state through tools | Same database. `lookup_order` and `check_refund_status` read it; `request_refund` writes it through `requestRefund` in `store.ts` |
+| **4. Control flow** | `lib/copper/assistant/ask.ts`: the browser sends only a chat id; the server loads the active agent, runs it, and stops Copper's turn at the hand-off | The same `ask.ts` runs the Refund agent on the same message. `requestRefund` (`store.ts`) applies `decideRefund` (`rules.ts`); the pause and the resume are the `pending_approval` state and `check_refund_status` |
+
+**Shared tool:** only read-only tools that change nothing may be shared, and
+today that is exactly `search_docs` (`SHARED_TOOLS` in `allowlists.ts`).
+`request_refund`, `lookup_order`, `check_refund_status` and both hand-off tools
+are never shared; `request_refund` is never in Copper's list.
+
+**Not agent tools:** approve, reject and set-limit are server actions in
+`actions.ts`, used only by the Console. Issuing a refund happens inside
+`requestRefund` (small orders) or the approve action (large ones). There is no
+`issue_refund` tool.
+
+**Data flow:** customer asks for a refund → Copper calls
+`handoff_to_refund_agent` (saves `active_agent = refund`) → `ask.ts` runs the
+Refund agent on the same message → `lookup_order` → `request_refund` →
+`requestRefund` reads the limit and decides: at or under the limit the order is
+refunded and logged; over it the order is `refund_pending` and a request waits
+→ a person clicks Approve or Reject in the Console (`actions.ts` → `store.ts`) →
+on the customer's next message the Refund agent calls `check_refund_status` and
+reports the outcome → `handoff_back_to_copper`.
+
+**Decisions and trade-offs:**
+
+- **Supabase, not a local file.** The chat and the Console must share changing
+  data, and a deployed site has no disk to keep a file on. All access is behind
+  `store.ts`, so the backend can be swapped.
+- **Server-only key, locked tables.** The tables have security on and no
+  policies, so only server code with the secret key can touch them. The cost is
+  one more secret to keep out of the repo.
+- **Rules in code, words in prompts.** The limit, ownership, the one-request-per-
+  order rule and the single-decision rule are enforced by `rules.ts`,
+  `store.ts` and a database constraint. The prompts only keep the conversation
+  honest.
+- **Allowlists enforced twice.** An agent is only handed its own tools, and each
+  tool checks again when it runs that it belongs to the agent the server says is
+  active. `allowlists.ts` holds the lists so the chat panel can show them
+  without importing server code.
+- **One hand-off per message.** After Copper hands over, the Refund agent
+  answers the same message; when the Refund agent hands back, the chat belongs
+  to Copper from the next message. This stops two agents bouncing a message back
+  and forth.
+
+**Risks and open questions:**
+
+- **The Console has no login.** Anyone who can open `/support` on a deployed site
+  can approve or reject a refund. It is a demo; a real one needs authentication.
+- **The customer is fixed.** There is one demo customer (`cust_demo`), chosen on
+  the server. Real use needs real sign-in.
+- **Model wording.** The code stops the model from issuing, approving or raising
+  a limit, but it can't stop it phrasing something badly. The tool results
+  carry plain messages and never the limit.
+- **No automatic follow-up.** After a person decides, the customer hears the
+  outcome on their next message, not instantly.
+- **Free tiers.** Google's free key allows few questions a day (a refund
+  conversation uses several), and a free Supabase project pauses after a week
+  of no use.
+- **Two writes per decision.** Approving updates the request and then the order.
+  Each is a compare-and-set, but they are not one transaction, so a failure
+  between them could leave them out of step; the audit log shows it.
+
+How to check the chat by hand: [Module 4 checklist](module-4-refund-checklist.md).

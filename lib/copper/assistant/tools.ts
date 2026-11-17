@@ -15,6 +15,7 @@ import {
 import { DOCUMENTS, pageUrl } from "@/lib/copper/documents";
 import { readInventory } from "@/lib/copper/inventory";
 import { PASSAGES } from "@/lib/copper/passages";
+import { logEvent, setActiveAgent } from "@/lib/copper/refund/store";
 
 export type ProductList = {
   products: {
@@ -271,3 +272,36 @@ export const copperTools = {
     execute: async ({ query }) => searchDocs(query),
   }),
 };
+
+/**
+ * Copper's hand-off to the Refund agent: the only way the chat moves to it. It
+ * only saves "refund" as this chat's active agent on the server; the app then
+ * runs the Refund agent. Copper has no refund tools of its own. Built for one
+ * chat, so the model can't pick which chat it changes.
+ */
+export function makeHandoffToRefundAgent({ chatId }: { chatId: string }) {
+  return tool({
+    description:
+      "Hands the chat to the Refund agent. Use it whenever the customer asks for a refund, a return, or their money back for an order they placed.",
+    inputSchema: z.object({
+      reason: z
+        .string()
+        .trim()
+        .min(3)
+        .max(200)
+        .describe("Why the customer wants a refund, in a few words."),
+    }),
+    execute: async ({ reason }) => {
+      await setActiveAgent(chatId, "refund");
+      await logEvent({
+        actor: "copper",
+        event: "handoff_to_refund_agent",
+        details: { reason },
+      });
+      return {
+        status: "ok" as const,
+        message: "Handing the chat to the Refund agent.",
+      };
+    },
+  });
+}
