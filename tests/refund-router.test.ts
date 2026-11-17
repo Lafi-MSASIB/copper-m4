@@ -106,6 +106,17 @@ describe("the allowlists", () => {
     expect(isToolAllowed("refund", "search_docs")).toBe(true);
   });
 
+  it("tell the Refund agent to quote an order only from a lookup, never from memory", () => {
+    const { instructions } = harnessFor("refund", ctx);
+    expect(instructions).toMatch(
+      /only state an order's item or amount when a lookup_order result/i,
+    );
+    expect(instructions).toMatch(/call lookup_order for it first/i);
+    expect(instructions).toMatch(
+      /approvals only come from the Refund Console/i,
+    );
+  });
+
   it("hand each agent only its own tools, and its own instructions", () => {
     const copper = harnessFor("copper", ctx);
     const refund = harnessFor("refund", ctx);
